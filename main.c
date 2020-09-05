@@ -47,6 +47,7 @@
 #define ELECTRODE_TAG "[ELECTRODE]"
 #define ELECTRODE_UNTAG "["
 #define ELECTRODE_NAME_MAXLEN 256
+#define MAX_CHANNELS 1096
 
 #define ANNOT_TRACKSIZE 54
 
@@ -54,12 +55,14 @@
 
 int total_elapsed_time;
 
-char labels[256][17];
+char labels[MAX_CHANNELS][17];
 
 
-int check_device(char *);
+int check_device_version(char *);
 
-int convert_nk2edf(FILE *, FILE *, FILE *,  int, int, int, char *, int);
+int ith_channel(FILE *, int, int, int, int);
+
+int convert_nk2edf(FILE *, FILE *, FILE *, int, int, int, int, int, char *, int);
 
 void latin1_to_utf8(char *, int);
 
@@ -82,6 +85,7 @@ int main(int argc, char *argv[])
       pathlen,
       fname_len,
       error,
+      version,
       ctl_block_cnt,
       datablock_cnt,
       total_blocks,
@@ -91,6 +95,11 @@ int main(int argc, char *argv[])
       total_logs=0,
       n_logblocks=0,
       ctlblock_address,
+      extblock_address,
+      extblock2_cnt,
+      extblock2_address,
+      extblock3_cnt,
+      extblock3_address,
       wfmblock_address,
       logblock_address,
       read_subevents=0;
@@ -193,7 +202,8 @@ int main(int argc, char *argv[])
   rewind(inputfile);
   fread(scratchpad, 16, 1, inputfile);
   scratchpad[16] = 0;
-  if(check_device(scratchpad))
+  version = check_device_version(scratchpad);
+  if(!version)
   {
     printf("Error, deviceblock has unknown signature: \"%s\"\n", scratchpad);
     fclose(inputfile);
@@ -202,9 +212,9 @@ int main(int argc, char *argv[])
   fseeko(inputfile, 0x0081LL, SEEK_SET);
   fread(scratchpad, 16, 1, inputfile);
   scratchpad[16] = 0;
-  if(check_device(scratchpad))
+  if(check_device_version(scratchpad) != version)
   {
-    printf("Error, controlblock has unknown signature: \"%s\"\n", scratchpad);
+    printf("Error, controlblock has unexpected signature: \"%s\"\n", scratchpad);
     fclose(inputfile);
     return(1);
   }
@@ -240,9 +250,9 @@ int main(int argc, char *argv[])
     rewind(logfile);
     fread(scratchpad, 16, 1, logfile);
     scratchpad[16] = 0;
-    if(check_device(scratchpad))
+    if(check_device_version(scratchpad) != version)
     {
-      printf("Error, .log file has unknown signature: \"%s\"\n", scratchpad);
+      printf("Error, .log file has unexpected signature: \"%s\"\n", scratchpad);
       fclose(logfile);
       fclose(inputfile);
       return(1);
@@ -384,9 +394,9 @@ int main(int argc, char *argv[])
     rewind(pntfile);
     fread(scratchpad, 16, 1, pntfile);
     scratchpad[16] = 0;
-    if(check_device(scratchpad))
+    if(check_device_version(scratchpad) != version)
     {
-      printf("error, .pnt file has unknown signature: \"%s\"\n", scratchpad);
+      printf("error, .pnt file has unexpected signature: \"%s\"\n", scratchpad);
       fclose(pntfile);
       fclose(logfile);
       fclose(inputfile);
@@ -398,7 +408,7 @@ int main(int argc, char *argv[])
 
 /***************** initialize labels **************************************/
 
-  for(i=0; i<256; i++)
+  for(i=0; i<MAX_CHANNELS; i++)
   {
     strcpy(labels[i], "-               ");
   }
@@ -456,6 +466,14 @@ int main(int argc, char *argv[])
     sprintf(labels[i], "EEG X%i        ", i - 88);
   }
   strcpy(labels[255], "Z               ");
+  for(i=256; i<999; i++)
+  {
+    sprintf(labels[i], "EEG EX%i       ", i + 1);
+  }
+  for(i=999; i<MAX_CHANNELS; i++)
+  {
+    sprintf(labels[i], "EEG EX%i      ", i + 1);
+  }
 
   if(read_21e_file(path))
   {
@@ -481,6 +499,30 @@ int main(int argc, char *argv[])
     return(1);
   }
 
+  if(version==2)
+  {
+    fseeko(inputfile, 0x03eeLL, SEEK_SET);
+    if(fread((char *)(&extblock_address), 4, 1, inputfile)!=1)
+    {
+      printf("Error reading inputfile.\n");
+      fclose(inputfile);
+      if(edfplus)
+      {
+        fclose(logfile);
+        free(log_buf);
+        free(sublog_buf);
+      }
+      return(1);
+    }
+    fseeko(inputfile, extblock_address + 17LL, SEEK_SET);
+    extblock2_cnt = fgetc(inputfile);
+    if(ctl_block_cnt!=1 || extblock2_cnt!=1)
+    {
+      printf("Error. Currently only files with a single control block are supported for EEG-1200A.\n");
+      return(1);
+    }
+  }
+
   for(i=0; i<ctl_block_cnt; i++)
   {
     fseeko(inputfile, 0x0092LL + (i * 20LL), SEEK_SET);
@@ -500,10 +542,33 @@ int main(int argc, char *argv[])
       return(1);
     }
 
+    if(version==2)
+    {
+      fseeko(inputfile, extblock_address + (i * 20LL) + 18LL, SEEK_SET);
+      fread((char *)(&extblock2_address), 4, 1, inputfile);
+      fseeko(inputfile, extblock2_address + 17LL, SEEK_SET);
+      extblock3_cnt = fgetc(inputfile);
+      if(datablock_cnt!=1 || extblock3_cnt!=1)
+      {
+        printf("Error. Currently only files with a single data block are supported for EEG-1200A.\n");
+        return(1);
+      }
+    }
+
     for(j=0; j<datablock_cnt; j++)
     {
       fseeko(inputfile, ctlblock_address + (j * 20LL) + 18LL, SEEK_SET);
       fread((char *)(&wfmblock_address), 4, 1, inputfile);
+
+      if(version==2)
+      {
+        fseeko(inputfile, extblock2_address + (j * 22LL) + 20LL, SEEK_SET);
+        fread((char *)(&extblock3_address), 4, 1, inputfile);
+      }
+      else
+      {
+        extblock3_address = 0;
+      }
 
    /********************************************************************/
 
@@ -524,7 +589,7 @@ int main(int argc, char *argv[])
         return(1);
       }
 
-      error = convert_nk2edf(inputfile, outputfile, pntfile, wfmblock_address, edfplus, total_logs, log_buf, read_subevents);
+      error = convert_nk2edf(inputfile, outputfile, pntfile, version, wfmblock_address, extblock3_address, edfplus, total_logs, log_buf, read_subevents);
       if(error==1)  printf("Malloc error during conversion\n");
       if(error==2)  printf("Read error during conversion.\n");
       if(error==3)  printf("Write error during conversion.\n");
@@ -576,7 +641,7 @@ int main(int argc, char *argv[])
 
 
 
-int convert_nk2edf(FILE *inputfile, FILE *outputfile, FILE *pntfile,  int offset, int edfplus, int n_logs, char *log_buf, int read_subevents)
+int convert_nk2edf(FILE *inputfile, FILE *outputfile, FILE *pntfile, int version, int offset, int ext_offset, int edfplus, int n_logs, char *log_buf, int read_subevents)
 {
   int i, j, k, p,
       temp,
@@ -598,6 +663,8 @@ int convert_nk2edf(FILE *inputfile, FILE *outputfile, FILE *pntfile,  int offset
   char *buf,
        *annotations,
        scratchpad[48];
+
+  unsigned char c;
 
 /************************* filter events ******************************************/
 
@@ -1021,8 +1088,18 @@ int convert_nk2edf(FILE *inputfile, FILE *outputfile, FILE *pntfile,  int offset
   temp = fgetc(inputfile);
   fprintf(outputfile, "%02u", ((temp >> 4) * 10) + (temp & 15));
 
-  fseeko(inputfile, 0x0026LL + offset, SEEK_SET);
-  channels = fgetc(inputfile) + 1;
+  if(version==2)
+  {
+    fseeko(inputfile, 0x0044LL + ext_offset, SEEK_SET);
+    c = fgetc(inputfile);
+    channels = ((fgetc(inputfile) << 8) | c) + 1;
+  }
+  else
+  {
+    fseeko(inputfile, 0x0026LL + offset, SEEK_SET);
+    channels = fgetc(inputfile) + 1;
+  }
+
   if(edfplus)
   {
     fprintf(outputfile, "%-8u", (channels + 1) * 256 + 256);
@@ -1034,8 +1111,17 @@ int convert_nk2edf(FILE *inputfile, FILE *outputfile, FILE *pntfile,  int offset
     fprintf(outputfile, "%-8u", channels * 256 + 256);
     for(i=0; i<44; i++)  fputc(' ', outputfile);
   }
-  fseeko(inputfile, 0x001cLL + offset, SEEK_SET);
-  fread((char *)(&record_duration), 4, 1, inputfile);
+
+  if(version==2)
+  {
+    fseeko(inputfile, 0x002cLL + ext_offset, SEEK_SET);
+    fread((char *)(&record_duration), 4, 1, inputfile);
+  }
+  else
+  {
+    fseeko(inputfile, 0x001cLL + offset, SEEK_SET);
+    fread((char *)(&record_duration), 4, 1, inputfile);
+  }
   if((record_duration < 10) || (record_duration > 99999999))
   {
     return(4);
@@ -1047,9 +1133,8 @@ int convert_nk2edf(FILE *inputfile, FILE *outputfile, FILE *pntfile,  int offset
 
   for(i=0; i<(channels - 1); i++)
   {
-    fseeko(inputfile, (long long)(0x0027 + (i * 10) + offset), SEEK_SET);
-    temp = fgetc(inputfile);
-    if((temp < 0) || (temp > 255))
+    temp = ith_channel(inputfile, version, offset, ext_offset, i);
+    if((temp < 0) || (temp > MAX_CHANNELS - 1))
     {
       fprintf(outputfile, "-               ");
     }
@@ -1068,8 +1153,7 @@ int convert_nk2edf(FILE *inputfile, FILE *outputfile, FILE *pntfile,  int offset
 
   for(i=0; i<(channels - 1); i++)
   {
-    fseeko(inputfile, 0x0027LL + (i * 10LL) + offset, SEEK_SET);
-    temp = fgetc(inputfile);
+    temp = ith_channel(inputfile, version, offset, ext_offset, i);
     if(((temp<42)||(temp>73)) && (temp!=76) && (temp!=77))  fprintf(outputfile, "uV      ");
     else  fprintf(outputfile, "mV      ");
   }
@@ -1078,8 +1162,7 @@ int convert_nk2edf(FILE *inputfile, FILE *outputfile, FILE *pntfile,  int offset
 
   for(i=0; i<(channels - 1); i++)
   {
-    fseeko(inputfile, 0x0027LL + (i * 10LL) + offset, SEEK_SET);
-    temp = fgetc(inputfile);
+    temp = ith_channel(inputfile, version, offset, ext_offset, i);
     if(((temp<42)||(temp>73)) && (temp!=76) && (temp!=77))  fprintf(outputfile, "-3200   ");
     else  fprintf(outputfile, "-12002.9");
   }
@@ -1088,8 +1171,7 @@ int convert_nk2edf(FILE *inputfile, FILE *outputfile, FILE *pntfile,  int offset
 
   for(i=0; i<(channels - 1); i++)
   {
-    fseeko(inputfile, 0x0027LL + (i * 10LL) + offset, SEEK_SET);
-    temp = fgetc(inputfile);
+    temp = ith_channel(inputfile, version, offset, ext_offset, i);
     if(((temp<42)||(temp>73)) && (temp!=76) && (temp!=77))  fprintf(outputfile, "3199.902");
     else  fprintf(outputfile, "12002.56");
   }
@@ -1133,7 +1215,14 @@ int convert_nk2edf(FILE *inputfile, FILE *outputfile, FILE *pntfile,  int offset
   deci_seconds = 0;
   n_log_processed = 0;
 
-  fseeko(inputfile, (long long)(0x0027LL + offset + ((channels - 1) * 10LL)), SEEK_SET);
+  if(version==2)
+  {
+    fseeko(inputfile, (long long)(0x0048LL + ext_offset + ((channels - 1) * 10LL)), SEEK_SET);
+  }
+  else
+  {
+    fseeko(inputfile, (long long)(0x0027LL + offset + ((channels - 1) * 10LL)), SEEK_SET);
+  }
 
   left_records = record_duration;
 
@@ -1223,27 +1312,46 @@ int convert_nk2edf(FILE *inputfile, FILE *outputfile, FILE *pntfile,  int offset
   return(0);
 }
 
-
-int check_device(char *str)
+int ith_channel(FILE *inputfile, int version, int offset, int ext_offset, int i)
 {
-  int error = 1;
+  int channel;
+  unsigned char c;
 
-  if(!strncmp(str, "EEG-1100A V01.00", 16))  error = 0;
-  if(!strncmp(str, "EEG-1100B V01.00", 16))  error = 0;
-  if(!strncmp(str, "EEG-1100C V01.00", 16))  error = 0;
-  if(!strncmp(str, "QI-403A   V01.00", 16))  error = 0;
-  if(!strncmp(str, "QI-403A   V02.00", 16))  error = 0;
-  if(!strncmp(str, "EEG-2100  V01.00", 16))  error = 0;
-  if(!strncmp(str, "EEG-2100  V02.00", 16))  error = 0;
-  if(!strncmp(str, "DAE-2100D V01.30", 16))  error = 0;
-  if(!strncmp(str, "DAE-2100D V02.00", 16))  error = 0;
-  if(!strncmp(str, "EEG-1100A V02.00", 16))  error = 0;
-  if(!strncmp(str, "EEG-1100B V02.00", 16))  error = 0;
-  if(!strncmp(str, "EEG-1100C V02.00", 16))  error = 0;
+  if(version==2)
+  {
+    fseeko(inputfile, (long long)(0x0048 + (i * 10) + ext_offset), SEEK_SET);
+    c = fgetc(inputfile);
+    channel = (fgetc(inputfile) << 8) | c;
+  }
+  else
+  {
+    fseeko(inputfile, 0x0027LL + (i * 10LL) + offset, SEEK_SET);
+    channel = fgetc(inputfile);
+  }
+  return channel;
+}
+
+int check_device_version(char *str)
+{
+  int version = 0;
+
+  if(!strncmp(str, "EEG-1100A V01.00", 16))  version = 1;
+  if(!strncmp(str, "EEG-1100B V01.00", 16))  version = 1;
+  if(!strncmp(str, "EEG-1100C V01.00", 16))  version = 1;
+  if(!strncmp(str, "QI-403A   V01.00", 16))  version = 1;
+  if(!strncmp(str, "QI-403A   V02.00", 16))  version = 1;
+  if(!strncmp(str, "EEG-2100  V01.00", 16))  version = 1;
+  if(!strncmp(str, "EEG-2100  V02.00", 16))  version = 1;
+  if(!strncmp(str, "DAE-2100D V01.30", 16))  version = 1;
+  if(!strncmp(str, "DAE-2100D V02.00", 16))  version = 1;
+  if(!strncmp(str, "EEG-1100A V02.00", 16))  version = 1;
+  if(!strncmp(str, "EEG-1100B V02.00", 16))  version = 1;
+  if(!strncmp(str, "EEG-1100C V02.00", 16))  version = 1;
+  if(!strncmp(str, "EEG-1200A V01.00", 16))  version = 2;
   /* workaround for log file quirk where the last character of the version string is missing: */
-  if((!strncmp(str, "EEG-1100A V02.0",  15)) && (str[15] == 0))  error = 0;
+  if((!strncmp(str, "EEG-1100A V02.0",  15)) && (str[15] == 0))  version = 1;
 
-  return(error);
+  return(version);
 }
 
 
@@ -1524,7 +1632,6 @@ int read_21e_file(char *e21filepath)
 
   FILE *inputfile;
 
-
   e21filepath[strlen(e21filepath) - 4] = 0;
   strcat(e21filepath, ".21E");
   inputfile = fopeno(e21filepath, "rb");
@@ -1584,7 +1691,7 @@ int read_21e_file(char *e21filepath)
 
           n = strlen(electrode_name);
 
-          if((idx >= 0) && (idx < 256))
+          if((idx >= 0) && (idx < MAX_CHANNELS))
           {
             if(n > 0)
             {
