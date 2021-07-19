@@ -35,6 +35,11 @@
 
 #define fopeno fopen
 
+#elif defined(_WIN32) || defined(_WIN64)
+
+#define fopeno fopen
+#define fseeko _fseeki64
+
 #else
 
 #define fseeko fseeko64
